@@ -1,0 +1,6 @@
+{
+  "name": "Trading_bot - Automated Multi-Pair Trading Platform",
+  "description": "Plateforme Progressive Web App (PWA) de trading spot Binance avec scanner d'opportunités, contrôle d'accès sécurisé multi-utilisateurs par clé administrateur et synchronisation directe des comptes réels.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
