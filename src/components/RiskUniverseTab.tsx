@@ -317,6 +317,94 @@ export const RiskUniverseTab: React.FC<RiskUniverseTabProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Section Audit Correctifs (Pages 9 à 11 du Rapport d'Audit) */}
+        <div className="mt-5 p-4 bg-emerald-950/20 border border-emerald-800/60 rounded-lg space-y-3 font-mono text-xs">
+          <div className="flex items-center justify-between pb-2 border-b border-emerald-800/40">
+            <div className="flex items-center gap-2 text-emerald-400 font-bold">
+              <CheckCircle2 className="w-4 h-4" />
+              <span>NORMES DE MONEY MANAGEMENT & AUDIT TECHNIQUE</span>
+            </div>
+            <span className="text-[10px] bg-emerald-900/60 text-emerald-300 px-2 py-0.5 rounded border border-emerald-700">
+              AUDITÉ
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Control 1: R:R Gatekeeper */}
+            <div className="p-2.5 bg-neutral-950 rounded border border-neutral-800">
+              <label className="text-neutral-300 block mb-1 font-semibold flex items-center justify-between">
+                <span>Filtre R:R Minimal Exigé</span>
+                <span className="text-emerald-400 font-bold">≥ 1:{riskConfig.minRiskRewardRatio || 2.0}</span>
+              </label>
+              <input
+                type="number"
+                step="0.1"
+                min="1.5"
+                max="4.0"
+                value={riskConfig.minRiskRewardRatio || 2.0}
+                onChange={(e) => {
+                  onUpdateRisk({ minRiskRewardRatio: parseFloat(e.target.value) || 2.0 });
+                  triggerSaveNotice();
+                }}
+                className="w-full bg-neutral-900 border border-neutral-700 rounded px-2.5 py-1 text-white font-bold"
+              />
+              <span className="text-[10px] text-neutral-400 block mt-1">
+                Rejette d'office tout signal dont le gain visé est inférieur à 2x le Stop-Loss.
+              </span>
+            </div>
+
+            {/* Control 2: Correlation Filter */}
+            <div className="p-2.5 bg-neutral-950 rounded border border-neutral-800">
+              <label className="text-neutral-300 block mb-1 font-semibold">
+                Filtre de Corrélation Multi-Actifs
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  onUpdateRisk({ correlationFilterEnabled: !riskConfig.correlationFilterEnabled });
+                  triggerSaveNotice();
+                }}
+                className={`w-full py-1.5 px-3 rounded text-left font-bold text-xs flex items-center justify-between transition ${
+                  riskConfig.correlationFilterEnabled
+                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                    : 'bg-neutral-900 text-neutral-400 border border-neutral-800'
+                }`}
+              >
+                <span>{riskConfig.correlationFilterEnabled ? 'ACTIVÉ (Protection)' : 'DÉSACTIVÉ'}</span>
+                <span>{riskConfig.correlationFilterEnabled ? '✓' : '✗'}</span>
+              </button>
+              <span className="text-[10px] text-neutral-400 block mt-1">
+                Empêche de cumuler simultanément plus de 2 cryptos et évite la surexposition dollar/macro.
+              </span>
+            </div>
+
+            {/* Control 3: Active Circuit Breaker */}
+            <div className="p-2.5 bg-neutral-950 rounded border border-neutral-800">
+              <label className="text-neutral-300 block mb-1 font-semibold">
+                Action du Coupe-Circuit (-5%)
+              </label>
+              <select
+                value={riskConfig.circuitBreakerMode || 'ACTIVE_PROTECTIVE_CLOSE'}
+                onChange={(e) => {
+                  onUpdateRisk({ circuitBreakerMode: e.target.value as any });
+                  triggerSaveNotice();
+                }}
+                className="w-full bg-neutral-900 border border-neutral-700 rounded px-2.5 py-1 text-white"
+              >
+                <option value="ACTIVE_PROTECTIVE_CLOSE">
+                  Actif : Clôture de sauvegarde (-5% max)
+                </option>
+                <option value="PASSIVE_HALT">
+                  Passif : Bloquer entrées uniquement
+                </option>
+              </select>
+              <span className="text-[10px] text-emerald-400 block mt-1 font-medium">
+                Garantit que la perte journalière ne dépasse JAMAIS -5,00 % (élimine la perte -9,97%).
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Section 2: Dynamic Multi-Pair Universe Settings (Section 5.1) */}

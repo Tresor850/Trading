@@ -28,12 +28,12 @@ export interface EngineState {
 }
 
 export const DEFAULT_RISK_CONFIG: PortfolioRiskConfig = {
-  riskPerTradePct: 2.0, // 2%
-  stopLossPct: 1.5, // 1.5%
-  takeProfitRatio: 2.0, // 1:2 -> TP = 3.0%
+  riskPerTradePct: 1.0, // Règle d'or Audit : Risque strict de 1% du capital total par trade
+  stopLossPct: 1.5, // 1.5% distance au stop loss
+  takeProfitRatio: 2.0, // Ratio 1:2 -> Take Profit à 3.0% (Gain visé = 2x la perte max)
   maxSimultaneousPositions: 5,
-  maxAllocationPerPositionPct: 20.0, // 20% max per position
-  dailyLossCircuitBreakerPct: 5.0, // 5% max daily drawdown -> 24h pause
+  maxAllocationPerPositionPct: 20.0, // 20% max par position
+  dailyLossCircuitBreakerPct: 5.0, // 5% max daily drawdown
   circuitBreakerPauseHours: 24,
   maxEntriesPerCandle: 2,
   cooldownCandlesAfterExit: 3,
@@ -43,6 +43,9 @@ export const DEFAULT_RISK_CONFIG: PortfolioRiskConfig = {
   atrMultiplier: 1.5,
   minNotionalUsd: 10,
   timeframe: '1h',
+  minRiskRewardRatio: 2.0, // Filtre R:R >= 1:2 strict
+  correlationFilterEnabled: true, // Filtre de corrélation multi-actifs actif
+  circuitBreakerMode: 'ACTIVE_PROTECTIVE_CLOSE', // Protection stricte de sauvegarde du capital à -5%
 };
 
 export const DEFAULT_UNIVERSE_CONFIG: UniverseConfig = {

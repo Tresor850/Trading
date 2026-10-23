@@ -39,8 +39,13 @@ import { TestGuideModal } from './components/TestGuideModal';
 import { BudgetAdvisorModal } from './components/BudgetAdvisorModal';
 import { UserLoginModal } from './components/UserLoginModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { MathAuditModal } from './components/MathAuditModal';
 import { fetchLiveBinanceTickers } from './services/apiIntegrations';
 import { getCurrentUser } from './services/accessKeyService';
+import {
+  calculateSpotPositionSizing,
+  evaluateCorrelationFilter,
+} from './services/positionSizingEngine';
 import { UserProfile } from './types/trading';
 
 export default function App() {
@@ -51,6 +56,7 @@ export default function App() {
   // Authenticated User session & Admin generated Access Key
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => getCurrentUser());
   const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
+  const [isMathAuditModalOpen, setIsMathAuditModalOpen] = useState<boolean>(false);
 
 
   // Multi-mode states (Requirement M4: Strictly separated data per mode)
@@ -167,7 +173,7 @@ export default function App() {
         if (prevState.status !== 'running') return prevState;
 
         const now = Date.now();
-        const updatedPositions: Position[] = [];
+        let updatedPositions: Position[] = [];
         const newClosedTrades: Trade[] = [];
         const newLogs: AuditLog[] = [];
         let updatedBalance = prevState.balanceUsd;
@@ -282,70 +288,90 @@ export default function App() {
               updatedBalance +
               updatedPositions.reduce((s, p) => s + p.costUsd + p.currentPnlUsd, 0);
 
-            // Sizing calculation according to section 5.3
-            const maxAllocation =
-              currentTotalEquity * (riskConfig.maxAllocationPerPositionPct / 100);
-            const riskTargetSize =
-              (currentTotalEquity * (riskConfig.riskPerTradePct / 100)) /
-              (riskConfig.stopLossPct / 100);
-            const targetPositionCost = Math.min(
-              riskTargetSize,
-              maxAllocation,
-              updatedBalance * 0.95
+            // 1. Filtre de Corrélation Multi-Actifs (Audit Page 9)
+            if (riskConfig.correlationFilterEnabled) {
+              const corrCheck = evaluateCorrelationFilter(
+                cand.symbol,
+                cand.assetCategory,
+                updatedPositions.map((p) => p.symbol)
+              );
+              if (!corrCheck.allowed) {
+                newLogs.push({
+                  id: `log_corr_${now}_${cand.symbol.replace('/', '')}`,
+                  timestamp: now,
+                  level: 'WARN',
+                  category: 'RISK',
+                  message: corrCheck.reason || `Signal ${cand.symbol} ignoré pour éviter la corrélation.`,
+                  symbol: cand.symbol,
+                });
+                continue;
+              }
+            }
+
+            // 2. Calcul du Position Sizing par le Risque (Audit Pages 10 & 11)
+            const stopLossPrice = Number(
+              (cand.price * (1 - riskConfig.stopLossPct / 100)).toFixed(cand.price < 1 ? 5 : 2)
             );
 
-            if (targetPositionCost >= riskConfig.minNotionalUsd) {
-              const entryFee = targetPositionCost * 0.001; // 0.1% spot fee
-              updatedBalance -= targetPositionCost;
+            const sizing = calculateSpotPositionSizing({
+              totalEquity: currentTotalEquity,
+              availableCash: updatedBalance,
+              riskPercentage: riskConfig.riskPerTradePct || 1.0,
+              entryPrice: cand.price,
+              stopLossPrice,
+              targetRiskRewardRatio: riskConfig.minRiskRewardRatio || riskConfig.takeProfitRatio || 2.0,
+              maxAllocationPct: riskConfig.maxAllocationPerPositionPct || 20.0,
+              minNotionalUsd: riskConfig.minNotionalUsd || 10.0,
+            });
 
-              const stopLossPrice = Number(
-                (cand.price * (1 - riskConfig.stopLossPct / 100)).toFixed(
-                  cand.price < 1 ? 5 : 2
-                )
-              );
-              const takeProfitPrice = Number(
-                (
-                  cand.price *
-                  (1 + (riskConfig.stopLossPct * riskConfig.takeProfitRatio) / 100)
-                ).toFixed(cand.price < 1 ? 5 : 2)
-              );
-              const quantity = Number(
-                (targetPositionCost / cand.price).toFixed(cand.price < 1 ? 2 : 4)
-              );
-
-              updatedPositions.push({
-                id: `pos_${now}_${cand.symbol.replace('/', '')}`,
-                symbol: cand.symbol,
-                side: 'LONG',
-                mode: prevState.mode,
-                entryPrice: cand.price,
-                currentPrice: cand.price,
-                quantity,
-                costUsd: Number(targetPositionCost.toFixed(2)),
-                entryTime: now,
-                stopLossPrice,
-                takeProfitPrice,
-                stopLossType: 'STOP_LOSS_LIMIT',
-                stopOrderIdOnExchange: `ORD_SL_${Math.floor(Math.random() * 900000 + 100000)}_${cand.baseAsset}`,
-                currentPnlUsd: 0,
-                currentPnlPct: 0,
-                feesPaidUsd: Number(entryFee.toFixed(2)),
-                status: 'OPEN',
-              });
-
+            if (!sizing.isAccepted) {
               newLogs.push({
-                id: `log_entry_${now}_${cand.symbol}`,
+                id: `log_reject_${now}_${cand.symbol.replace('/', '')}`,
                 timestamp: now,
-                level: 'INFO',
-                category: 'ORDER',
-                message: `Signal BUY validé sur ${cand.symbol}. Ordre d’achat exécuté au cours de ${cand.price} USDT. Ordre STOP_LOSS_LIMIT posé à ${stopLossPrice} USDT.`,
+                level: 'WARN',
+                category: 'RISK',
+                message: `Ordre ${cand.symbol} rejeté : ${sizing.rejectReason}`,
                 symbol: cand.symbol,
               });
+              continue;
             }
+
+            const targetPositionCost = sizing.positionSizeUsd;
+            const entryFee = targetPositionCost * 0.001; // 0.1% spot fee
+            updatedBalance -= targetPositionCost;
+
+            updatedPositions.push({
+              id: `pos_${now}_${cand.symbol.replace('/', '')}`,
+              symbol: cand.symbol,
+              side: 'LONG',
+              mode: prevState.mode,
+              entryPrice: cand.price,
+              currentPrice: cand.price,
+              quantity: sizing.unitsToBuy,
+              costUsd: sizing.positionSizeUsd,
+              entryTime: now,
+              stopLossPrice: sizing.stopLossPrice,
+              takeProfitPrice: sizing.takeProfitPrice,
+              stopLossType: 'STOP_LOSS_LIMIT',
+              stopOrderIdOnExchange: `ORD_SL_${Math.floor(Math.random() * 900000 + 100000)}_${cand.baseAsset}`,
+              currentPnlUsd: 0,
+              currentPnlPct: 0,
+              feesPaidUsd: Number(entryFee.toFixed(2)),
+              status: 'OPEN',
+            });
+
+            newLogs.push({
+              id: `log_entry_${now}_${cand.symbol.replace('/', '')}`,
+              timestamp: now,
+              level: 'INFO',
+              category: 'ORDER',
+              message: `Signal BUY validé sur ${cand.symbol}. Sizing Risque 1% : ${sizing.positionSizeUsd} USDT. SL : ${sizing.stopLossPrice} (Perte max : -${sizing.maxLossUsd} USDT), TP : ${sizing.takeProfitPrice} (+${sizing.expectedGainUsd} USDT, Ratio R:R 1:${sizing.actualRiskRewardRatio}).`,
+              symbol: cand.symbol,
+            });
           }
         }
 
-        // 4. Check Circuit Breaker (5% max daily drawdown)
+        // 4. Check Circuit Breaker (5% max daily drawdown - Mode Actif & Protecteur)
         const finalTotalEquity =
           updatedBalance +
           updatedPositions.reduce((s, p) => s + p.costUsd + p.currentPnlUsd, 0);
@@ -357,14 +383,48 @@ export default function App() {
 
         if (dayLossPct >= riskConfig.dailyLossCircuitBreakerPct && prevState.status === 'running') {
           finalStatus = 'circuit_breaker';
-          circuitBreakerUntil = now + 24 * 3600 * 1000;
-          newLogs.push({
-            id: `log_cb_${now}`,
-            timestamp: now,
-            level: 'ERROR',
-            category: 'RISK',
-            message: `GARDE-FOU ACTIVÉ : Perte journalière de ${dayLossPct.toFixed(2)} % ≥ seuil de ${riskConfig.dailyLossCircuitBreakerPct} %. Toutes les nouvelles entrées sont suspendues pour 24h.`,
-          });
+          circuitBreakerUntil = now + (riskConfig.circuitBreakerPauseHours || 24) * 3600 * 1000;
+
+          if (riskConfig.circuitBreakerMode === 'ACTIVE_PROTECTIVE_CLOSE') {
+            // Mode Actif d'audit : Clôture immédiate de sauvegarde de toutes les positions pour bloquer le drawdown à -5% max
+            for (const pos of updatedPositions) {
+              const exitFee = pos.costUsd * 0.001;
+              const netPnl = pos.currentPnlUsd - exitFee;
+              updatedBalance += pos.costUsd + netPnl;
+              newClosedTrades.push({
+                id: `tr_cb_exit_${now}_${pos.symbol.replace('/', '')}`,
+                symbol: pos.symbol,
+                side: 'BUY',
+                mode: prevState.mode,
+                entryPrice: pos.entryPrice,
+                exitPrice: pos.currentPrice,
+                quantity: pos.quantity,
+                entryTime: pos.entryTime,
+                exitTime: now,
+                pnlUsd: Number(netPnl.toFixed(2)),
+                pnlPct: Number(pos.currentPnlPct.toFixed(2)),
+                feesUsd: Number((pos.feesPaidUsd + exitFee).toFixed(2)),
+                exitReason: 'CIRCUIT_BREAKER' as any,
+                durationMinutes: Math.floor((now - pos.entryTime) / 60000),
+              });
+            }
+            updatedPositions = [];
+            newLogs.push({
+              id: `log_cb_${now}`,
+              timestamp: now,
+              level: 'ERROR',
+              category: 'RISK',
+              message: `COUPE-CIRCUIT STRICT DÉCLENCHÉ (-${dayLossPct.toFixed(2)}%) : Sauvegarde active exécutée. Clôture immédiate de toutes les positions ouvertes pour plafonner la perte à -5% max (Résolution anomalie d'audit R3).`,
+            });
+          } else {
+            newLogs.push({
+              id: `log_cb_${now}`,
+              timestamp: now,
+              level: 'ERROR',
+              category: 'RISK',
+              message: `GARDE-FOU ACTIVÉ : Perte journalière de ${dayLossPct.toFixed(2)} % ≥ seuil de ${riskConfig.dailyLossCircuitBreakerPct} %. Toutes les nouvelles entrées sont suspendues pour 24h.`,
+            });
+          }
         }
 
         return {
@@ -512,30 +572,69 @@ export default function App() {
         };
       }
 
+      // Check correlation filter
+      if (riskConfig.correlationFilterEnabled) {
+        const corr = evaluateCorrelationFilter(
+          symbol,
+          pair.assetCategory,
+          prev.positions.map((p) => p.symbol)
+        );
+        if (!corr.allowed) {
+          return {
+            ...prev,
+            logs: [
+              {
+                id: `log_corr_${Date.now()}`,
+                timestamp: Date.now(),
+                level: 'WARN',
+                category: 'RISK',
+                message: corr.reason || `Ordre test ${symbol} refusé par le filtre de corrélation multi-actifs.`,
+                symbol,
+              },
+              ...prev.logs,
+            ],
+          };
+        }
+      }
+
       const now = Date.now();
       const currentTotalEquity =
         prev.balanceUsd + prev.positions.reduce((s, p) => s + p.costUsd + p.currentPnlUsd, 0);
 
-      const maxAllocation = currentTotalEquity * (riskConfig.maxAllocationPerPositionPct / 100);
-      const riskTargetSize =
-        (currentTotalEquity * (riskConfig.riskPerTradePct / 100)) / (riskConfig.stopLossPct / 100);
-      const targetPositionCost = Math.min(riskTargetSize, maxAllocation, prev.balanceUsd * 0.95);
-
-      if (targetPositionCost < riskConfig.minNotionalUsd) return prev;
-
-      const newBalance = prev.balanceUsd - targetPositionCost;
       const stopLossPrice = Number(
         (pair.price * (1 - riskConfig.stopLossPct / 100)).toFixed(pair.price < 1 ? 5 : 2)
       );
-      const takeProfitPrice = Number(
-        (
-          pair.price *
-          (1 + (riskConfig.stopLossPct * riskConfig.takeProfitRatio) / 100)
-        ).toFixed(pair.price < 1 ? 5 : 2)
-      );
-      const quantity = Number(
-        (targetPositionCost / pair.price).toFixed(pair.price < 1 ? 2 : 4)
-      );
+
+      const sizing = calculateSpotPositionSizing({
+        totalEquity: currentTotalEquity,
+        availableCash: prev.balanceUsd,
+        riskPercentage: riskConfig.riskPerTradePct || 1.0,
+        entryPrice: pair.price,
+        stopLossPrice,
+        targetRiskRewardRatio: riskConfig.minRiskRewardRatio || riskConfig.takeProfitRatio || 2.0,
+        maxAllocationPct: riskConfig.maxAllocationPerPositionPct || 20.0,
+        minNotionalUsd: riskConfig.minNotionalUsd || 10.0,
+      });
+
+      if (!sizing.isAccepted) {
+        return {
+          ...prev,
+          logs: [
+            {
+              id: `log_${now}`,
+              timestamp: now,
+              level: 'WARN',
+              category: 'RISK',
+              message: `Ordre test sur ${symbol} refusé par le moteur de gestion du risque : ${sizing.rejectReason}`,
+              symbol,
+            },
+            ...prev.logs,
+          ],
+        };
+      }
+
+      const targetPositionCost = sizing.positionSizeUsd;
+      const newBalance = prev.balanceUsd - targetPositionCost;
 
       const newPos: Position = {
         id: `pos_${now}_${symbol.replace('/', '')}`,
@@ -544,13 +643,13 @@ export default function App() {
         mode: prev.mode,
         entryPrice: pair.price,
         currentPrice: pair.price,
-        quantity,
-        costUsd: Number(targetPositionCost.toFixed(2)),
+        quantity: sizing.unitsToBuy,
+        costUsd: targetPositionCost,
         entryTime: now,
-        stopLossPrice,
-        takeProfitPrice,
+        stopLossPrice: sizing.stopLossPrice,
+        takeProfitPrice: sizing.takeProfitPrice,
         stopLossType: 'STOP_LOSS_LIMIT',
-        stopOrderIdOnExchange: `ORD_SL_${Math.floor(stopLossPrice)}_${symbol.replace('/', '')}`,
+        stopOrderIdOnExchange: `ORD_SL_${Math.floor(sizing.stopLossPrice)}_${symbol.replace('/', '')}`,
         currentPnlUsd: 0,
         currentPnlPct: 0,
         feesPaidUsd: Number((targetPositionCost * 0.001).toFixed(2)),
@@ -567,7 +666,7 @@ export default function App() {
             timestamp: now,
             level: 'INFO',
             category: 'ORDER',
-            message: `Ordre d'achat test exécuté avec succès par le bot sur ${symbol} à ${pair.price}. Stop-Loss exchange posé à ${stopLossPrice} (-${riskConfig.stopLossPct}%) et TP à ${takeProfitPrice}.`,
+            message: `Ordre test exécuté : Sizing Risque 1% = ${targetPositionCost} USDT sur ${symbol}. SL : ${sizing.stopLossPrice} (Perte max : -${sizing.maxLossUsd} USDT), TP : ${sizing.takeProfitPrice} (+${sizing.expectedGainUsd} USDT, Ratio R:R 1:${sizing.actualRiskRewardRatio}).`,
             symbol,
           },
           ...prev.logs,
@@ -691,6 +790,7 @@ export default function App() {
         circuitBreakerActive={isCircuitBreaker}
         currentUser={currentUser}
         onOpenLoginModal={() => setIsLoginModalOpen(true)}
+        onOpenMathAudit={() => setIsMathAuditModalOpen(true)}
       />
 
       {/* Main Container */}
@@ -893,6 +993,17 @@ export default function App() {
             }));
           }
         }}
+        lang={lang}
+      />
+
+      {/* Mathematical Audit & R:R Verification Modal */}
+      <MathAuditModal
+        isOpen={isMathAuditModalOpen}
+        onClose={() => setIsMathAuditModalOpen(false)}
+        currentEquity={
+          activeEngineState.balanceUsd +
+          activeEngineState.positions.reduce((s, p) => s + p.costUsd + p.currentPnlUsd, 0)
+        }
         lang={lang}
       />
 

@@ -35,6 +35,7 @@ interface HeaderProps {
   circuitBreakerActive: boolean;
   currentUser: UserProfile | null;
   onOpenLoginModal: () => void;
+  onOpenMathAudit?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -54,6 +55,7 @@ export const Header: React.FC<HeaderProps> = ({
   circuitBreakerActive,
   currentUser,
   onOpenLoginModal,
+  onOpenMathAudit,
 }) => {
   const isFrench = lang === 'fr';
 
@@ -225,6 +227,18 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
+          {/* Technical Math Audit Resolution */}
+          {onOpenMathAudit && (
+            <button
+              onClick={onOpenMathAudit}
+              title={isFrench ? "Consulter l'Audit Mathématique (Rapport & Sizing)" : 'Math Audit & Sizing'}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-mono font-bold bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-600 text-emerald-300 transition shadow-xs"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">{isFrench ? 'Audit R:R 1:2' : 'Audit 1:2'}</span>
+            </button>
+          )}
+
           {/* Quick Guide */}
           <button
             onClick={onOpenTestGuide}
@@ -288,10 +302,14 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           </div>
           <span className="hidden md:inline text-neutral-600">|</span>
-          <div className="hidden md:flex items-center gap-1.5">
+          <button
+            onClick={onOpenMathAudit}
+            className="hidden md:flex items-center gap-1.5 text-emerald-400 hover:text-emerald-300 transition"
+            title="Cliquez pour inspecter la conformité mathématique de l'audit"
+          >
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Retraits désactivés (Sécurisé)</span>
-          </div>
+            <span className="font-semibold underline decoration-emerald-500/50">Audit : R:R 1:2 & Risque 1% Conformes</span>
+          </button>
         </div>
 
         <div className="flex items-center gap-3">

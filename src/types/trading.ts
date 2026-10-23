@@ -95,6 +95,9 @@ export interface PortfolioRiskConfig {
   atrMultiplier: number; // e.g. 1.5
   minNotionalUsd: number; // e.g. 10 USDT
   timeframe: '15m' | '1h' | '4h' | '1d';
+  minRiskRewardRatio: number; // e.g. 2.0 (Strict R:R >= 1:2 gatekeeper)
+  correlationFilterEnabled: boolean; // e.g. true (Interdiction de sur-exposer des actifs corrélés)
+  circuitBreakerMode: 'ACTIVE_PROTECTIVE_CLOSE' | 'PASSIVE_HALT'; // Protection stricte vs suspension des entrées
 }
 
 export interface UniverseConfig {

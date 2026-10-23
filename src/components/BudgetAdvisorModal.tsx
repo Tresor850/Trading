@@ -97,12 +97,13 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
   const maxSimultaneousPositions = riskConfig.maxSimultaneousPositions || 5;
 
   const maxPositionSize = Number(((budgetInput * maxAllocationPct) / 100).toFixed(2));
-  const maxRiskAmount = Number(((budgetInput * profileSettings.riskPerTradePct) / 100).toFixed(2));
+  // Risque en devises sur le trade selon la distance au Stop-Loss (ex: 1.5% de l'allocation)
   const maxLossPerTrade = Number(((maxPositionSize * profileSettings.stopLossPct) / 100).toFixed(2));
-  const effectiveRiskAmount = Math.min(maxRiskAmount, maxLossPerTrade);
-  const targetGainPerTrade = Number(
-    ((maxPositionSize * profileSettings.takeProfitPct) / 100).toFixed(2)
-  );
+  // Gain visé en devises respectant strictement le ratio 1:2 (Gain = 2 x Perte)
+  const targetGainPerTrade = Number((maxLossPerTrade * profileSettings.takeProfitRatio).toFixed(2));
+  // Plafond de risque global de capital (ex: 1% du compte)
+  const accountRiskCap = Number(((budgetInput * profileSettings.riskPerTradePct) / 100).toFixed(2));
+  const effectiveRiskAmount = Math.min(accountRiskCap, maxLossPerTrade);
   const dailyCircuitBreakerAmount = Number(
     ((budgetInput * (riskConfig.dailyLossCircuitBreakerPct || 5)) / 100).toFixed(2)
   );
@@ -491,10 +492,10 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
             <div className="p-2.5 bg-neutral-900/80 rounded border border-neutral-800">
               <span className="text-neutral-500 block text-[10px]">Perte Max / Trade</span>
               <span className="font-bold text-rose-400 text-sm">
-                -{effectiveRiskAmount} {currencySymbol}
+                -{maxLossPerTrade} {currencySymbol}
               </span>
               <span className="text-[10px] text-neutral-400 block mt-0.5">
-                Stop-Loss à {profileSettings.stopLossPct}%
+                Stop-Loss à -{profileSettings.stopLossPct}%
               </span>
             </div>
 
@@ -503,8 +504,8 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
               <span className="font-bold text-emerald-400 text-sm">
                 +{targetGainPerTrade} {currencySymbol}
               </span>
-              <span className="text-[10px] text-neutral-400 block mt-0.5">
-                Take-Profit à +{profileSettings.takeProfitPct}%
+              <span className="text-[10px] text-emerald-400 block mt-0.5 font-bold">
+                Ratio R:R 1 : {profileSettings.takeProfitRatio.toFixed(1)} ✓
               </span>
             </div>
 
