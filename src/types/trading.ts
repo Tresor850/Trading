@@ -97,6 +97,7 @@ export interface PortfolioRiskConfig {
   timeframe: '15m' | '1h' | '4h' | '1d';
   minRiskRewardRatio: number; // e.g. 2.0 (Strict R:R >= 1:2 gatekeeper)
   correlationFilterEnabled: boolean; // e.g. true (Interdiction de sur-exposer des actifs corrélés)
+  trendFilterEnabled?: boolean; // Filtre de tendance EMA200 + régime BTC
   circuitBreakerMode: 'ACTIVE_PROTECTIVE_CLOSE' | 'PASSIVE_HALT'; // Protection stricte vs suspension des entrées
 }
 

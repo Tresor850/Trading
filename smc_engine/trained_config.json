@@ -1,0 +1,30 @@
+{
+  "target_risk_pct": 2.0,
+  "fallback_sl_pct": 2.5,
+  "rr_ratio": 2.5,
+  "max_positions": 2,
+  "max_allocation_pct": 48.0,
+  "daily_circuit_breaker_pct": 5.0,
+  "cooldown_candles": 6,
+  "swing_length": 5,
+  "atr_period": 14,
+  "sl_atr_buffer": 0.35,
+  "min_sl_distance_pct": 0.6,
+  "max_sl_distance_pct": 4.0,
+  "min_fvg_atr_ratio": 0.25,
+  "displacement_body_ratio": 0.6,
+  "require_discount_zone": true,
+  "quote_asset": "USDT",
+  "min_volume_24h_usd": 10000000,
+  "max_spread_pct": 0.08,
+  "max_scanned_pairs": 10,
+  "exclude_leveraged_tokens": true,
+  "exclude_stable_to_stable": true,
+  "exclude_monitoring_zone": true,
+  "whitelist": [
+    "ADAUSDT",
+    "DOTUSDT",
+    "ETHUSDT",
+    "XRPUSDT"
+  ]
+}

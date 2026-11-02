@@ -18,6 +18,9 @@ import {
   X,
 } from 'lucide-react';
 
+import { getLastBacktest, runRealBacktest } from '../services/backtestRunner';
+import { BacktestResultEx } from '../services/backtestEngine';
+
 interface BudgetAdvisorModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -37,14 +40,13 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
   onApplyBudget,
   lang,
 }) => {
-  if (!isOpen) return null;
   const isFrench = lang === 'fr';
 
   // State
   const [budgetInput, setBudgetInput] = useState<number>(
     currentBalance > 0 ? currentBalance : 1000
   );
-  const [selectedCurrency, setSelectedCurrency] = useState<'EUR' | 'USD' | 'USDT'>('EUR');
+  const [selectedCurrency, setSelectedCurrency] = useState<'EUR' | 'USD' | 'USDT'>('USDT');
   const [horizonMonths, setHorizonMonths] = useState<number>(3); // 1, 3, 6, 12 months
   const [riskProfile, setRiskProfile] = useState<'prudent' | 'standard' | 'dynamic'>('standard');
   const [appliedSuccess, setAppliedSuccess] = useState<boolean>(false);
@@ -61,9 +63,6 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
           stopLossPct: 1.2,
           takeProfitRatio: 2.0,
           takeProfitPct: 2.4,
-          monthlyReturnEstPct: 3.8,
-          favorableMonthlyPct: 6.2,
-          conservativeMonthlyPct: 0.8,
           label: isFrench ? 'Prudent (Préservation)' : 'Prudent (Preservation)',
         };
       case 'dynamic':
@@ -72,9 +71,6 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
           stopLossPct: 2.0,
           takeProfitRatio: 2.0,
           takeProfitPct: 4.0,
-          monthlyReturnEstPct: 8.5,
-          favorableMonthlyPct: 14.0,
-          conservativeMonthlyPct: -1.5,
           label: isFrench ? 'Dynamique (Croissance)' : 'Dynamic (Growth)',
         };
       case 'standard':
@@ -84,9 +80,6 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
           stopLossPct: riskConfig.stopLossPct || 1.5,
           takeProfitRatio: riskConfig.takeProfitRatio || 2.0,
           takeProfitPct: (riskConfig.stopLossPct || 1.5) * (riskConfig.takeProfitRatio || 2.0),
-          monthlyReturnEstPct: 5.6,
-          favorableMonthlyPct: 9.8,
-          conservativeMonthlyPct: 0.2,
           label: isFrench ? 'Standard (Recommandé v1.0)' : 'Standard (Recommended v1.0)',
         };
     }
@@ -102,43 +95,40 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
   // Gain visé en devises respectant strictement le ratio 1:2 (Gain = 2 x Perte)
   const targetGainPerTrade = Number((maxLossPerTrade * profileSettings.takeProfitRatio).toFixed(2));
   // Plafond de risque global de capital (ex: 1% du compte)
-  const accountRiskCap = Number(((budgetInput * profileSettings.riskPerTradePct) / 100).toFixed(2));
-  const effectiveRiskAmount = Math.min(accountRiskCap, maxLossPerTrade);
   const dailyCircuitBreakerAmount = Number(
     ((budgetInput * (riskConfig.dailyLossCircuitBreakerPct || 5)) / 100).toFixed(2)
   );
   const estimatedFeePerTrade = Number((maxPositionSize * 0.001).toFixed(2)); // 0.10%
 
-  // Projections
-  const realisticFinal = Number(
-    (budgetInput * Math.pow(1 + profileSettings.monthlyReturnEstPct / 100, horizonMonths)).toFixed(2)
-  );
-  const realisticGain = Number((realisticFinal - budgetInput).toFixed(2));
-  const realisticGainPct = Number(((realisticGain / budgetInput) * 100).toFixed(1));
-
-  const favorableFinal = Number(
-    (budgetInput * Math.pow(1 + profileSettings.favorableMonthlyPct / 100, horizonMonths)).toFixed(2)
-  );
-  const conservativeFinal = Number(
-    (
-      budgetInput * Math.pow(1 + profileSettings.conservativeMonthlyPct / 100, horizonMonths)
-    ).toFixed(2)
-  );
-
-  // Month-by-month curve data for projection visualization
-  const monthlySteps = useMemo(() => {
-    const steps = [];
-    let current = budgetInput;
-    for (let m = 0; m <= horizonMonths; m++) {
-      if (m === 0) {
-        steps.push({ month: 'Départ', value: budgetInput });
-      } else {
-        current = current * (1 + profileSettings.monthlyReturnEstPct / 100);
-        steps.push({ month: `Mois ${m}`, value: Number(current.toFixed(2)) });
-      }
+  // Projections : bootstrap des trades du backtest réel (aucun rendement codé en dur)
+  const [bt, setBt] = useState<BacktestResultEx | null>(getLastBacktest());
+  const [btLoading, setBtLoading] = useState(false);
+  const [btError, setBtError] = useState('');
+  const launchBacktest = async () => {
+    setBtLoading(true);
+    setBtError('');
+    try {
+      setBt(await runRealBacktest(riskConfig, budgetInput, 90));
+    } catch (e: any) {
+      setBtError(`Historique Binance indisponible (${e?.message || 'réseau'}). Aucune projection n'est affichée.`);
     }
-    return steps;
-  }, [budgetInput, horizonMonths, profileSettings.monthlyReturnEstPct]);
+    setBtLoading(false);
+  };
+  const proj = useMemo(() => {
+    if (!bt || bt.dataSource !== 'binance' || bt.tradeReturns.length < 20) return null;
+    let seed = 42;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
+    const nTrades = Math.max(1, Math.round(bt.tradesPerMonth * horizonMonths));
+    const finals: number[] = [];
+    for (let k = 0; k < 500; k++) {
+      let e = budgetInput;
+      for (let t = 0; t < nTrades; t++) e *= 1 + bt.tradeReturns[Math.floor(rnd() * bt.tradeReturns.length)];
+      finals.push(e);
+    }
+    finals.sort((x, y) => x - y);
+    const q = (f: number) => Number(finals[Math.floor(f * (finals.length - 1))].toFixed(2));
+    return { low: q(0.1), mid: q(0.5), high: q(0.9), lossProb: Math.round((finals.filter((x) => x < budgetInput).length / finals.length) * 100) };
+  }, [bt, budgetInput, horizonMonths]);
 
   // Recommended pairs matching the currency
   const recommendedPairs = useMemo(() => {
@@ -242,6 +232,8 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
   };
 
   const presetBudgets = [250, 500, 1000, 2500, 5000, 10000];
+
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-xs p-3 sm:p-4">
@@ -374,8 +366,7 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
             <div className="mt-3 p-2 bg-neutral-900 rounded border border-neutral-800 text-[11px] text-neutral-300">
               {selectedCurrency === 'EUR' && (
                 <span className="text-emerald-300">
-                  🇫🇷 Optimisé pour <strong>CAC40/EUR</strong>, <strong>USD/EUR</strong> et les actions
-                  européennes.
+                  Binance Spot ne propose que des paires crypto : les cotations EUR/USD ne sont pas tradées par ce bot.
                 </span>
               )}
               {selectedCurrency === 'USD' && (
@@ -442,7 +433,7 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
             </div>
 
             <div className="text-[10px] text-neutral-400 mt-2">
-              Risque : {profileSettings.riskPerTradePct}% | SL : {profileSettings.stopLossPct}% | TP :{' '}
+              Risque max visé : {profileSettings.riskPerTradePct}% (réel ≈ {((maxLossPerTrade / (budgetInput || 1)) * 100).toFixed(2)}% car plafonné par l’allocation) | SL : {profileSettings.stopLossPct}% | TP :{' '}
               {profileSettings.takeProfitPct}%
             </div>
           </div>
@@ -519,96 +510,53 @@ export const BudgetAdvisorModal: React.FC<BudgetAdvisorModalProps> = ({
           </div>
         </div>
 
-        {/* Section 2: Projections & Prediction Simulation */}
+        {/* Section 2 : projections issues du backtest réel */}
         <div className="bg-neutral-950 border border-neutral-800 rounded-lg p-5 mb-5 font-mono text-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-neutral-800">
+          <div className="flex items-center justify-between gap-2 pb-3 border-b border-neutral-800">
             <div className="flex items-center gap-2">
               <TrendingUp className="w-5 h-5 text-emerald-400" />
               <div>
                 <span className="font-bold text-white text-sm">
-                  {isFrench
-                    ? `PRÉDICTIONS & SIMULATION DU RENDEMENT (${horizonMonths} MOIS)`
-                    : `PREDICTIONS & RETURN SIMULATION (${horizonMonths} MONTHS)`}
+                  PROJECTION ISSUE DU BACKTEST RÉEL ({horizonMonths} MOIS)
                 </span>
                 <span className="text-[11px] text-neutral-400 block">
-                  Modélisation basée sur la stratégie EMA 9/21 + RSI 14 (Historique : 58% Win Rate,
-                  Ratio 1:2)
+                  Tirage de 500 trajectoires à partir des trades réellement mesurés (EMA 9/21 + RSI 14, 90 j Binance 1h, frais inclus).
                 </span>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-emerald-400 font-bold text-sm bg-emerald-950/80 border border-emerald-800 px-3 py-1 rounded">
-                +{realisticGainPct}% ({realisticGain >= 0 ? '+' : ''}
-                {realisticGain} {currencySymbol})
-              </span>
-            </div>
+            <button onClick={launchBacktest} disabled={btLoading} className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-white font-bold">
+              {btLoading ? 'Téléchargement…' : 'Lancer le backtest'}
+            </button>
           </div>
-
-          {/* Scenarios Comparison */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 mt-4">
-            {/* Conservative */}
-            <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg">
-              <span className="text-neutral-400 text-[11px] block">Scénario Prudent / Range</span>
-              <div className="text-base font-bold text-neutral-200 mt-1">
-                {conservativeFinal.toLocaleString()} {currencySymbol}
-              </div>
-              <span className="text-[10px] text-neutral-500 block mt-0.5">
-                Rendement : +{(profileSettings.conservativeMonthlyPct * horizonMonths).toFixed(1)}% |
-                Protection maximale
-              </span>
+          {btError && <div className="mt-3 text-rose-300">{btError}</div>}
+          {!proj ? (
+            <div className="mt-3 text-neutral-400">
+              Aucun backtest sur données réelles : aucune projection n'est affichée plutôt que d'en inventer une.
             </div>
-
-            {/* Realistic (Baseline) */}
-            <div className="p-3 bg-emerald-950/40 border border-emerald-800 rounded-lg shadow-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-emerald-400 font-bold text-[11px]">
-                  Scénario Réaliste (Recommandé)
-                </span>
-                <span className="text-[10px] bg-emerald-900/60 text-emerald-200 px-1.5 py-0.5 rounded">
-                  Probable 70%
-                </span>
+          ) : (
+            <>
+              <div className="mt-3 text-neutral-300">
+                Mesuré : {bt!.totalTrades} trades, taux de réussite {bt!.winRatePct}%, profit factor {bt!.profitFactor}, drawdown max {bt!.maxDrawdownPct}%, rendement net {bt!.netProfitPct}% sur la période.
               </div>
-              <div className="text-lg font-bold text-emerald-300 mt-1">
-                {realisticFinal.toLocaleString()} {currencySymbol}
-              </div>
-              <span className="text-[10px] text-emerald-400/80 block mt-0.5">
-                Profit estimé : +{realisticGain} {currencySymbol} (+
-                {(profileSettings.monthlyReturnEstPct * horizonMonths).toFixed(1)}%)
-              </span>
-            </div>
-
-            {/* Favorable */}
-            <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg">
-              <span className="text-neutral-400 text-[11px] block">Scénario Marché Porteur</span>
-              <div className="text-base font-bold text-sky-400 mt-1">
-                {favorableFinal.toLocaleString()} {currencySymbol}
-              </div>
-              <span className="text-[10px] text-neutral-500 block mt-0.5">
-                Rendement : +{(profileSettings.favorableMonthlyPct * horizonMonths).toFixed(1)}% |
-                Tendance forte
-              </span>
-            </div>
-          </div>
-
-          {/* Stepped Projection Progress */}
-          <div className="mt-4 pt-4 border-t border-neutral-800">
-            <span className="text-neutral-400 block text-[11px] mb-2 font-semibold">
-              Trajectoire prévisionnelle de votre capital mois par mois :
-            </span>
-            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-2">
-              {monthlySteps.map((step, idx) => (
-                <div
-                  key={idx}
-                  className="p-2 bg-neutral-900 rounded border border-neutral-800 flex items-center justify-between"
-                >
-                  <span className="text-neutral-500 text-[10px]">{step.month}</span>
-                  <span className="font-bold text-emerald-400 text-xs">
-                    {step.value.toLocaleString()} {currencySymbol}
-                  </span>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 mt-4">
+                <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg">
+                  <span className="text-neutral-400 text-[11px] block">Défavorable (10e percentile)</span>
+                  <div className="text-base font-bold text-rose-300 mt-1">{proj.low.toLocaleString()} {currencySymbol}</div>
                 </div>
-              ))}
-            </div>
-          </div>
+                <div className="p-3 bg-neutral-900 border border-neutral-700 rounded-lg">
+                  <span className="text-neutral-300 text-[11px] block font-bold">Médian</span>
+                  <div className="text-lg font-bold text-white mt-1">{proj.mid.toLocaleString()} {currencySymbol}</div>
+                </div>
+                <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg">
+                  <span className="text-neutral-400 text-[11px] block">Favorable (90e percentile)</span>
+                  <div className="text-base font-bold text-sky-400 mt-1">{proj.high.toLocaleString()} {currencySymbol}</div>
+                </div>
+              </div>
+              <div className="mt-3 text-[11px] text-neutral-400">
+                Probabilité de finir sous le capital de départ : {proj.lossProb}%. Les performances passées ne préjugent pas du futur ; la projection suppose que le marché futur ressemble aux 90 derniers jours.
+              </div>
+            </>
+          )}
         </div>
 
         {/* Section 3: Recommended Pairs & Live Calculated Orders for this Currency */}

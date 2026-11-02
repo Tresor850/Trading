@@ -107,6 +107,12 @@ export default defineConfig(() => {
           rewrite: (pathStr) => pathStr.replace(/^\/api\/binance-testnet/, ''),
           secure: true,
         },
+        // Proxy for local SMC FastAPI Python Engine
+        '/api/smc': {
+          target: 'http://127.0.0.1:8005',
+          changeOrigin: true,
+          secure: false,
+        },
       },
     },
   };

@@ -1,224 +1,194 @@
-import {
-  PortfolioRiskConfig,
-  UniverseConfig,
-  BacktestResult,
-  Trade,
-} from '../types/trading';
+import { PortfolioRiskConfig, UniverseConfig, BacktestResult, Trade, Candle } from '../types/trading';
+import { calculateSpotPositionSizing, evaluateCorrelationFilter } from './positionSizingEngine';
 
-export function runPortfolioBacktest(
-  riskConfig: PortfolioRiskConfig,
-  universeConfig: UniverseConfig,
-  initialCapital: number = 10000,
-  daysBack: number = 60
-): BacktestResult {
-  const simulatedPairs = [
-    { symbol: 'CAC40/EUR', baseWinRate: 0.64, avgTradeReturn: 0.026, vol: 0.015 },
-    { symbol: 'SPX/USD', baseWinRate: 0.66, avgTradeReturn: 0.025, vol: 0.012 },
-    { symbol: 'XAU/USD', baseWinRate: 0.61, avgTradeReturn: 0.023, vol: 0.016 },
-    { symbol: 'BTC/USDT', baseWinRate: 0.62, avgTradeReturn: 0.024, vol: 0.018 },
-    { symbol: 'ETH/USDT', baseWinRate: 0.58, avgTradeReturn: 0.022, vol: 0.022 },
-    { symbol: 'SOL/USDT', baseWinRate: 0.65, avgTradeReturn: 0.028, vol: 0.035 },
-    { symbol: 'BNB/USDT', baseWinRate: 0.55, avgTradeReturn: 0.019, vol: 0.016 },
-    { symbol: 'XRP/USDT', baseWinRate: 0.54, avgTradeReturn: 0.021, vol: 0.028 },
-    { symbol: 'AVAX/USDT', baseWinRate: 0.56, avgTradeReturn: 0.023, vol: 0.032 },
-    { symbol: 'LINK/USDT', baseWinRate: 0.60, avgTradeReturn: 0.025, vol: 0.026 },
-    { symbol: 'NEAR/USDT', baseWinRate: 0.59, avgTradeReturn: 0.026, vol: 0.034 },
-    { symbol: 'SUI/USDT', baseWinRate: 0.63, avgTradeReturn: 0.029, vol: 0.040 },
-    { symbol: 'DOGE/USDT', baseWinRate: 0.52, avgTradeReturn: 0.020, vol: 0.038 },
-  ];
+/**
+ * Vrai backtest : rejoue la stratégie EMA 9/21 + RSI 14 sur des bougies 1h,
+ * avec SL/TP réels (high/low), frais 0,1 %/côté, slippage 0,05 % et coupe-circuit journalier.
+ * Aucune probabilité de gain n'est codée en dur : le taux de réussite est un RÉSULTAT.
+ */
+export type BacktestResultEx = BacktestResult & {
+  dataSource: 'binance' | 'synthetic';
+  tradesPerMonth: number;
+  /** Rendement net de chaque trade, en fraction du capital au moment de l'entrée */
+  tradeReturns: number[];
+  /** Mêmes données, stratégie d'origine sans filtre de tendance (comparaison) */
+  baseline?: { netProfitPct: number; winRatePct: number; profitFactor: number };
+  /** Dernier tiers de la période, jamais utilisé pour choisir les réglages */
+  outOfSample?: { netProfitPct: number; winRatePct: number; totalTrades: number; profitFactor: number };
+};
 
-  let currentEquity = initialCapital;
-  let peakEquity = initialCapital;
-  let maxDrawdownUsd = 0;
-  let maxDrawdownPct = 0;
-  let totalFeesPaid = 0;
-  let circuitBreakerCount = 0;
+/** Signal d'achat partagé par le backtest et le moteur live : croisement EMA9>EMA21, RSI<70, + filtre de tendance optionnel */
+export function isBuySignal(e9: number[], e21: number[], e200: number[], r: number[], c: Candle[], i: number, trend: boolean, marketOk: boolean): boolean {
+  if (!(e9[i] > e21[i] && e9[i - 1] <= e21[i - 1] && r[i] < 70)) return false;
+  if (!trend) return true;
+  return marketOk && c[i].close > e200[i] && e21[i] > e21[i - 3] && r[i] >= 45;
+}
 
+const FEE = 0.001;
+const SLIP = 0.0005;
+const DAY = 86400000;
+
+export function emaSeries(c: Candle[], p: number): number[] {
+  const k = 2 / (p + 1);
+  const out: number[] = [];
+  c.forEach((x, i) => out.push(i === 0 ? x.close : x.close * k + out[i - 1] * (1 - k)));
+  return out;
+}
+
+export function rsiSeries(c: Candle[], p = 14): number[] {
+  const out = new Array(c.length).fill(50);
+  let g = 0, l = 0;
+  for (let i = 1; i < c.length; i++) {
+    const d = c[i].close - c[i - 1].close;
+    const up = Math.max(d, 0), dn = Math.max(-d, 0);
+    if (i <= p) { g += up / p; l += dn / p; } else { g = (g * (p - 1) + up) / p; l = (l * (p - 1) + dn) / p; }
+    if (i >= p) out[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+  }
+  return out;
+}
+
+interface Open { symbol: string; entry: number; qty: number; cost: number; sl: number; tp: number; t: number; fees: number; cash0: number }
+
+export function runStrategyBacktest(
+  data: Record<string, Candle[]>,
+  risk: PortfolioRiskConfig,
+  capital = 10000,
+  source: 'binance' | 'synthetic' = 'binance',
+  opts: { trend?: boolean; start?: number; crossExit?: boolean } = {}
+): BacktestResultEx {
+  const trend = opts.trend ?? risk.trendFilterEnabled !== false;
+  const symbols = Object.keys(data);
+  const n = Math.min(...symbols.map((s) => data[s].length));
+  const cs: Record<string, Candle[]> = {};
+  symbols.forEach((s) => (cs[s] = data[s].slice(-n)));
+  const ema200 = {} as Record<string, number[]>, ema9 = {} as Record<string, number[]>, ema21 = {} as Record<string, number[]>, rsi = {} as Record<string, number[]>;
+  symbols.forEach((s) => { ema9[s] = emaSeries(cs[s], 9); ema21[s] = emaSeries(cs[s], 21); ema200[s] = emaSeries(cs[s], 200); rsi[s] = rsiSeries(cs[s]); });
+
+  let cash = capital, peak = capital, maxDdPct = 0, maxDdUsd = 0, fees = 0, cbCount = 0;
+  let open: Open[] = [];
+  let pending: string[] = [];
   const trades: Trade[] = [];
-  const pairStatsMap: Record<
-    string,
-    { tradesCount: number; wins: number; pnlUsd: number; grossProfit: number; grossLoss: number }
-  > = {};
+  const rets: number[] = [];
+  const curve: BacktestResult['equityCurve'] = [];
+  let dayKey = -1, dayStart = capital, halted = false;
+  const mark = (i: number) => cash + open.reduce((s, p) => s + p.qty * cs[p.symbol][i].close, 0);
 
-  simulatedPairs.forEach((p) => {
-    pairStatsMap[p.symbol] = { tradesCount: 0, wins: 0, pnlUsd: 0, grossProfit: 0, grossLoss: 0 };
-  });
-
-  const now = Date.now();
-  const dayMs = 86400 * 1000;
-  const startTime = now - daysBack * dayMs;
-  const equityCurve: Array<{ timestamp: number; dateStr: string; equity: number; drawdownPct: number }> = [];
-
-  let dailyEquityStart = currentEquity;
-  let isDailyCircuitBreakerActive = false;
-
-  for (let day = 0; day < daysBack; day++) {
-    const dayTimestamp = startTime + day * dayMs;
-    const dateStr = new Date(dayTimestamp).toLocaleDateString('fr-FR', {
-      month: 'short',
-      day: 'numeric',
+  const close = (p: Open, px: number, i: number, reason: Trade['exitReason'], equityBefore: number) => {
+    const exitFee = p.qty * px * FEE;
+    const pnl = p.qty * (px - p.entry) - p.fees - exitFee;
+    cash += p.qty * px - exitFee;
+    fees += p.fees + exitFee;
+    rets.push(pnl / p.cash0);
+    trades.push({
+      id: `bt_${trades.length + 1}`, symbol: p.symbol, side: 'BUY', mode: 'simulation',
+      entryPrice: p.entry, exitPrice: px, quantity: p.qty, entryTime: p.t, exitTime: cs[p.symbol][i].timestamp,
+      pnlUsd: Number(pnl.toFixed(2)), pnlPct: Number(((pnl / p.cost) * 100).toFixed(2)), feesUsd: Number((p.fees + exitFee).toFixed(2)),
+      exitReason: reason, durationMinutes: Math.round((cs[p.symbol][i].timestamp - p.t) / 60000),
     });
+  };
 
-    dailyEquityStart = currentEquity;
-    isDailyCircuitBreakerActive = false;
+  const first = Math.max(22, trend ? 200 : 22, opts.start ?? 0);
+  const btc = symbols.includes('BTC/USDT') ? 'BTC/USDT' : symbols[0];
+  for (let i = first; i < n; i++) {
+    const ts = cs[symbols[0]][i].timestamp;
+    const dk = Math.floor(ts / DAY);
+    if (dk !== dayKey) { dayKey = dk; dayStart = mark(i - 1); halted = false; }
 
-    // Simulate 24 candles per day
-    for (let h = 0; h < 24; h += 4) {
-      if (isDailyCircuitBreakerActive) break;
-
-      // Check daily loss circuit breaker
-      const dayLossPct = ((dailyEquityStart - currentEquity) / dailyEquityStart) * 100;
-      if (dayLossPct >= riskConfig.dailyLossCircuitBreakerPct) {
-        isDailyCircuitBreakerActive = true;
-        circuitBreakerCount++;
-        break;
+    // 1. entrées planifiées (signal à la clôture précédente, exécution à l'ouverture)
+    if (!halted) {
+      for (const s of pending) {
+        if (open.length >= risk.maxSimultaneousPositions || open.some((p) => p.symbol === s)) continue;
+        if (risk.correlationFilterEnabled && !evaluateCorrelationFilter(s, 'crypto', open.map((p) => p.symbol)).allowed) continue;
+        const px = cs[s][i].open * (1 + SLIP);
+        const eq = mark(i - 1);
+        const sz = calculateSpotPositionSizing({
+          totalEquity: eq, availableCash: cash, riskPercentage: risk.riskPerTradePct, entryPrice: px,
+          stopLossPrice: px * (1 - risk.stopLossPct / 100), targetRiskRewardRatio: risk.minRiskRewardRatio || risk.takeProfitRatio,
+          maxAllocationPct: risk.maxAllocationPerPositionPct, minNotionalUsd: risk.minNotionalUsd,
+        });
+        if (!sz.isAccepted) continue;
+        const cost = sz.positionSizeUsd, f = cost * FEE;
+        cash -= cost + f;
+        open.push({ symbol: s, entry: px, qty: cost / px, cost, sl: px * (1 - risk.stopLossPct / 100), tp: sz.takeProfitPrice, t: cs[s][i].timestamp, fees: f, cash0: eq });
       }
+    }
+    pending = [];
 
-      // Check candidate signals
-      const candidates = simulatedPairs.filter(() => Math.random() < 0.12);
-      // Sort by volume / priority
-      const entriesToTake = candidates.slice(0, riskConfig.maxEntriesPerCandle);
+    // 2. sorties : SL prioritaire si SL et TP touchés dans la même bougie (hypothèse prudente)
+    for (const p of [...open]) {
+      const c = cs[p.symbol][i];
+      let done = true;
+      if (c.low <= p.sl) close(p, p.sl * (1 - SLIP), i, 'STOP_LOSS', 0);
+      else if (c.high >= p.tp) close(p, p.tp, i, 'TAKE_PROFIT', 0);
+      else if (opts.crossExit && ema9[p.symbol][i] < ema21[p.symbol][i] && ema9[p.symbol][i - 1] >= ema21[p.symbol][i - 1]) close(p, c.close, i, 'MANUAL', 0);
+      else done = false;
+      if (done) open = open.filter((x) => x !== p);
+    }
 
-      for (const candidate of entriesToTake) {
-        // Enforce max simultaneous positions (max 5)
-        const maxAllocation = currentEquity * (riskConfig.maxAllocationPerPositionPct / 100);
-        // Risk-based sizing: equity * risk% / stopLoss%
-        const riskTargetSize = (currentEquity * (riskConfig.riskPerTradePct / 100)) / (riskConfig.stopLossPct / 100);
-        const positionSizeUsd = Math.min(riskTargetSize, maxAllocation, currentEquity * 0.95);
+    // 3. coupe-circuit journalier (clôture de protection)
+    const eq = mark(i);
+    if (!halted && (dayStart - eq) / dayStart * 100 >= risk.dailyLossCircuitBreakerPct) {
+      halted = true; cbCount++;
+      open.forEach((p) => close(p, cs[p.symbol][i].close, i, 'EMERGENCY_STOP', 0));
+      open = [];
+    }
 
-        if (positionSizeUsd < riskConfig.minNotionalUsd) continue;
-
-        // Trade outcome simulation based on EMA/RSI historical stats
-        const isWin = Math.random() < candidate.baseWinRate;
-        const slippagePct = 0.0005; // 0.05% slippage
-        const feeRate = 0.001; // 0.1% spot maker/taker
-
-        let returnPct: number;
-        let exitReason: 'TAKE_PROFIT' | 'STOP_LOSS';
-
-        if (isWin) {
-          // Take profit hit
-          returnPct = (riskConfig.stopLossPct * riskConfig.takeProfitRatio) / 100 - slippagePct;
-          exitReason = 'TAKE_PROFIT';
-        } else {
-          // Stop loss hit
-          returnPct = -((riskConfig.stopLossPct) / 100) - slippagePct;
-          exitReason = 'STOP_LOSS';
-        }
-
-        const grossPnl = positionSizeUsd * returnPct;
-        const fees = positionSizeUsd * feeRate * 2; // entry + exit
-        const netPnl = grossPnl - fees;
-
-        currentEquity += netPnl;
-        totalFeesPaid += fees;
-
-        if (currentEquity > peakEquity) {
-          peakEquity = currentEquity;
-        }
-        const currentDrawdownUsd = peakEquity - currentEquity;
-        const currentDrawdownPct = (currentDrawdownUsd / peakEquity) * 100;
-        if (currentDrawdownPct > maxDrawdownPct) {
-          maxDrawdownPct = currentDrawdownPct;
-          maxDrawdownUsd = currentDrawdownUsd;
-        }
-
-        // Record trade
-        const durationHours = Math.floor(Math.random() * 12) + 2;
-        const tradeEntryTime = dayTimestamp + h * 3600 * 1000;
-        const exitTime = tradeEntryTime + durationHours * 3600 * 1000;
-
-        const trade: Trade = {
-          id: `bt_${trades.length + 1}`,
-          symbol: candidate.symbol,
-          side: 'BUY',
-          mode: 'simulation',
-          entryPrice: 100,
-          exitPrice: 100 * (1 + returnPct),
-          quantity: Number((positionSizeUsd / 100).toFixed(4)),
-          entryTime: tradeEntryTime,
-          exitTime,
-          pnlUsd: Number(netPnl.toFixed(2)),
-          pnlPct: Number((returnPct * 100).toFixed(2)),
-          feesUsd: Number(fees.toFixed(2)),
-          exitReason,
-          durationMinutes: durationHours * 60,
-        };
-        trades.push(trade);
-
-        // Stats by pair
-        const pStat = pairStatsMap[candidate.symbol];
-        if (pStat) {
-          pStat.tradesCount++;
-          if (isWin) {
-            pStat.wins++;
-            pStat.grossProfit += netPnl;
-          } else {
-            pStat.grossLoss += Math.abs(netPnl);
-          }
-          pStat.pnlUsd += netPnl;
-        }
+    // 4. signaux à la clôture
+    if (!halted) {
+      for (const s of symbols) {
+        if (isBuySignal(ema9[s], ema21[s], ema200[s], rsi[s], cs[s], i, trend, cs[btc][i].close > ema200[btc][i])) pending.push(s);
       }
     }
 
-    const dayDrawdownPct = peakEquity > 0 ? ((peakEquity - currentEquity) / peakEquity) * 100 : 0;
-    equityCurve.push({
-      timestamp: dayTimestamp,
-      dateStr,
-      equity: Number(currentEquity.toFixed(2)),
-      drawdownPct: Number(dayDrawdownPct.toFixed(2)),
-    });
+    const e = mark(i);
+    peak = Math.max(peak, e);
+    const dd = ((peak - e) / peak) * 100;
+    if (dd > maxDdPct) { maxDdPct = dd; maxDdUsd = peak - e; }
+    if (i % 24 === 0) curve.push({ timestamp: ts, dateStr: new Date(ts).toLocaleDateString('fr-FR', { month: 'short', day: 'numeric' }), equity: Number(e.toFixed(2)), drawdownPct: Number(dd.toFixed(2)) });
   }
 
-  const winningTrades = trades.filter((t) => t.pnlUsd > 0).length;
-  const losingTrades = trades.filter((t) => t.pnlUsd <= 0).length;
-  const totalTrades = trades.length;
-  const winRatePct = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
-
-  const totalGrossProfit = trades.filter((t) => t.pnlUsd > 0).reduce((sum, t) => sum + t.pnlUsd, 0);
-  const totalGrossLoss = Math.abs(
-    trades.filter((t) => t.pnlUsd < 0).reduce((sum, t) => sum + t.pnlUsd, 0)
-  );
-  const profitFactor = totalGrossLoss > 0 ? totalGrossProfit / totalGrossLoss : 2.5;
-
-  const netProfitUsd = currentEquity - initialCapital;
-  const netProfitPct = (netProfitUsd / initialCapital) * 100;
-
-  // Approximate Sharpe ratio (daily returns standard dev)
-  const returns = equityCurve.map((pt, i) => (i === 0 ? 0 : (pt.equity - equityCurve[i - 1].equity) / equityCurve[i - 1].equity));
-  const avgDailyReturn = returns.reduce((a, b) => a + b, 0) / (returns.length || 1);
-  const variance = returns.reduce((sum, r) => sum + Math.pow(r - avgDailyReturn, 2), 0) / (returns.length || 1);
-  const dailyStdDev = Math.sqrt(variance);
-  const annualizedSharpe = dailyStdDev > 0 ? (avgDailyReturn / dailyStdDev) * Math.sqrt(365) : 1.45;
-
-  const pairBreakdown = Object.entries(pairStatsMap).map(([symbol, stat]) => ({
-    symbol,
-    tradesCount: stat.tradesCount,
-    winRate: stat.tradesCount > 0 ? Number(((stat.wins / stat.tradesCount) * 100).toFixed(1)) : 0,
-    pnlUsd: Number(stat.pnlUsd.toFixed(2)),
-    profitFactor: stat.grossLoss > 0 ? Number((stat.grossProfit / stat.grossLoss).toFixed(2)) : 1.5,
-  })).sort((a, b) => b.pnlUsd - a.pnlUsd);
+  const last = mark(n - 1);
+  const wins = trades.filter((t) => t.pnlUsd > 0), losses = trades.filter((t) => t.pnlUsd <= 0);
+  const gp = wins.reduce((s, t) => s + t.pnlUsd, 0), gl = Math.abs(losses.reduce((s, t) => s + t.pnlUsd, 0));
+  const dr = curve.map((p, k) => (k ? (p.equity - curve[k - 1].equity) / curve[k - 1].equity : 0));
+  const mu = dr.reduce((a, b) => a + b, 0) / (dr.length || 1);
+  const sd = Math.sqrt(dr.reduce((a, b) => a + (b - mu) ** 2, 0) / (dr.length || 1));
+  const days = Math.max(1, (n - first) / 24);
+  const pairBreakdown = symbols.map((s) => {
+    const t = trades.filter((x) => x.symbol === s), w = t.filter((x) => x.pnlUsd > 0);
+    const g = w.reduce((a, x) => a + x.pnlUsd, 0), l = Math.abs(t.filter((x) => x.pnlUsd <= 0).reduce((a, x) => a + x.pnlUsd, 0));
+    return { symbol: s, tradesCount: t.length, winRate: t.length ? Number(((w.length / t.length) * 100).toFixed(1)) : 0, pnlUsd: Number(t.reduce((a, x) => a + x.pnlUsd, 0).toFixed(2)), profitFactor: l > 0 ? Number((g / l).toFixed(2)) : 0 };
+  }).sort((a, b) => b.pnlUsd - a.pnlUsd);
 
   return {
-    startDate: new Date(startTime).toLocaleDateString('fr-FR'),
-    endDate: new Date(now).toLocaleDateString('fr-FR'),
-    initialBalance: initialCapital,
-    finalBalance: Number(currentEquity.toFixed(2)),
-    netProfitUsd: Number(netProfitUsd.toFixed(2)),
-    netProfitPct: Number(netProfitPct.toFixed(2)),
-    totalTrades,
-    winningTrades,
-    losingTrades,
-    winRatePct: Number(winRatePct.toFixed(1)),
-    profitFactor: Number(profitFactor.toFixed(2)),
-    maxDrawdownPct: Number(maxDrawdownPct.toFixed(2)),
-    maxDrawdownUsd: Number(maxDrawdownUsd.toFixed(2)),
-    sharpeRatio: Number(annualizedSharpe.toFixed(2)),
-    averageTradeDurationHours: 6.4,
-    totalFeesPaidUsd: Number(totalFeesPaid.toFixed(2)),
-    circuitBreakerTriggers: circuitBreakerCount,
-    equityCurve,
-    trades,
-    pairBreakdown,
+    startDate: new Date(cs[symbols[0]][first].timestamp).toLocaleDateString('fr-FR'), endDate: new Date(cs[symbols[0]][n - 1].timestamp).toLocaleDateString('fr-FR'),
+    initialBalance: capital, finalBalance: Number(last.toFixed(2)), netProfitUsd: Number((last - capital).toFixed(2)), netProfitPct: Number((((last - capital) / capital) * 100).toFixed(2)),
+    totalTrades: trades.length, winningTrades: wins.length, losingTrades: losses.length, winRatePct: trades.length ? Number(((wins.length / trades.length) * 100).toFixed(1)) : 0,
+    profitFactor: gl > 0 ? Number((gp / gl).toFixed(2)) : 0, maxDrawdownPct: Number(maxDdPct.toFixed(2)), maxDrawdownUsd: Number(maxDdUsd.toFixed(2)),
+    sharpeRatio: sd > 0 ? Number(((mu / sd) * Math.sqrt(365)).toFixed(2)) : 0,
+    averageTradeDurationHours: trades.length ? Number((trades.reduce((a, t) => a + t.durationMinutes, 0) / trades.length / 60).toFixed(1)) : 0,
+    totalFeesPaidUsd: Number(fees.toFixed(2)), circuitBreakerTriggers: cbCount, equityCurve: curve, trades, pairBreakdown,
+    dataSource: source, tradesPerMonth: Number(((trades.length / days) * 30).toFixed(1)), tradeReturns: rets,
   };
+}
+
+/** Données de contrôle (marche aléatoire sans tendance) : sert uniquement de test à vide, jamais de prévision. */
+export function syntheticCandles(count = 1500, vol = 0.008, seed = 1): Candle[] {
+  let s = seed;
+  const rnd = () => ((s = (s * 1664525 + 1013904223) % 4294967296) / 4294967296);
+  const out: Candle[] = [];
+  let px = 100;
+  const t0 = Math.floor(Date.now() / 3600000) * 3600000 - count * 3600000;
+  for (let i = 0; i < count; i++) {
+    const o = px, c = o * (1 + (rnd() - 0.5) * 2 * vol);
+    out.push({ timestamp: t0 + i * 3600000, open: o, close: c, high: Math.max(o, c) * (1 + rnd() * vol * 0.4), low: Math.min(o, c) * (1 - rnd() * vol * 0.4), volume: 1 });
+    px = c;
+  }
+  return out;
+}
+
+export function runPortfolioBacktest(risk: PortfolioRiskConfig, _u: UniverseConfig, capital = 10000, daysBack = 60): BacktestResultEx {
+  const data: Record<string, Candle[]> = {};
+  ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'AVAX', 'LINK', 'NEAR', 'SUI', 'DOGE'].forEach((b, k) => (data[`${b}/USDT`] = syntheticCandles(Math.max(120, daysBack * 24), 0.008, k + 7)));
+  return runStrategyBacktest(data, risk, capital, 'synthetic');
 }

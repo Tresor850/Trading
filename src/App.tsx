@@ -20,7 +20,7 @@ import {
   evaluatePairFilters,
   EngineState,
 } from './services/tradingEngine';
-import { buildInitialMarketPairs } from './data/mockMarkets';
+import { fetchRealMarkets, fetchPrices } from './services/marketData';
 
 import { Header } from './components/Header';
 import { DashboardTab } from './components/DashboardTab';
@@ -91,7 +91,8 @@ export default function App() {
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>(DEFAULT_TELEGRAM_CONFIG);
 
   // Scanned market pairs (60+ Binance spot pairs)
-  const [pairs, setPairs] = useState<MarketPair[]>(() => buildInitialMarketPairs());
+  const [pairs, setPairs] = useState<MarketPair[]>([]);
+  const [marketError, setMarketError] = useState<string>('');
 
   // Modals & User Custom Budget
   const [isWizardOpen, setIsWizardOpen] = useState<boolean>(false);
@@ -127,47 +128,24 @@ export default function App() {
   };
 
 
-  // Initial live Binance ticker fetch
+  // Marchés réels Binance : rafraîchissement complet (bougies + signaux) chaque minute, prix chaque 5 s
   useEffect(() => {
-    let isMounted = true;
-    fetchLiveBinanceTickers().then((res) => {
-      if (res.success && res.tickers && isMounted) {
-        setPairs((prev) =>
-          prev.map((p) => {
-            const live = res.tickers![p.symbol];
-            if (live && live.price > 0) {
-              return {
-                ...p,
-                price: live.price,
-                change24h: live.change24h,
-                volume24h: live.volume24h,
-              };
-            }
-            return p;
-          })
-        );
-      }
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+    let alive = true;
+    const full = () =>
+      fetchRealMarkets(riskConfig.trendFilterEnabled !== false)
+        .then((m) => { if (alive) { setPairs(m); setMarketError(''); } })
+        .catch((e) => alive && setMarketError(`Données Binance indisponibles : ${e.message}`));
+    full();
+    const t1 = setInterval(full, 60000);
+    const t2 = setInterval(() => {
+      fetchPrices().then((px) => alive && setPairs((prev) => prev.map((p) => (px[p.symbol] ? { ...p, price: px[p.symbol] } : p)))).catch(() => {});
+    }, 5000);
+    return () => { alive = false; clearInterval(t1); clearInterval(t2); };
+  }, [riskConfig.trendFilterEnabled]);
 
-  // Live real-time tick engine loop (every 3.5 seconds)
+  // Boucle moteur (3,5 s) : suivi des positions sur les prix réels
   useEffect(() => {
     const interval = setInterval(() => {
-      // 1. Slightly drift market prices realistically
-      setPairs((prevPairs) =>
-        prevPairs.map((p) => {
-          const driftPct = (Math.random() - 0.49) * 0.004; // 0.2% drift
-          const newPrice = Number((p.price * (1 + driftPct)).toFixed(p.price < 1 ? 5 : 2));
-          return {
-            ...p,
-            price: newPrice,
-          };
-        })
-      );
-
       // 2. If engine is running, update positions & evaluate triggers
       setActiveEngineState((prevState) => {
         if (prevState.status !== 'running') return prevState;

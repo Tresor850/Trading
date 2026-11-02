@@ -143,12 +143,7 @@ export async function pingBinanceApi(isTestnet: boolean = false): Promise<{
       clockDriftMs,
     };
   } catch (err: any) {
-    // If CORS or offline in preview container, return simulated low-latency fallback
-    return {
-      success: true,
-      latencyMs: Math.floor(Math.random() * 12) + 22,
-      clockDriftMs: Math.floor(Math.random() * 4) + 2,
-    };
+    return { success: false, error: err?.message || 'Binance injoignable' } as any;
   }
 }
 
@@ -326,21 +321,15 @@ export async function fetchRealBinanceAccount(params: {
     // Process balances: filter out trivial dust balances (< 0.0001) unless major assets
     const rawBalances: Array<{ asset: string; free: string; locked: string }> = data.balances || [];
     
-    // Quick reference mock prices for conversion of non-zero assets
-    const refPrices: Record<string, number> = {
-      USDT: 1.0,
-      FDUSD: 1.0,
-      USDC: 1.0,
-      EUR: 1.08,
-      BTC: 89500,
-      ETH: 2650,
-      SOL: 182,
-      BNB: 640,
-      XRP: 1.95,
-      ADA: 0.85,
-      DOGE: 0.28,
-      AVAX: 34.5,
-    };
+    // Prix réels Binance pour valoriser les soldes (stables = 1, sinon cours spot XXXUSDT ; 0 si inconnu)
+    let livePx: Record<string, number> = {};
+    try {
+      const pr = await fetch('https://api.binance.com/api/v3/ticker/price');
+      (await pr.json()).forEach((t: any) => { livePx[t.symbol] = +t.price; });
+    } catch { /* valorisation partielle */ }
+    const refPrices = new Proxy({} as Record<string, number>, {
+      get: (_t, asset: string) => (['USDT', 'FDUSD', 'USDC'].includes(asset) ? 1 : livePx[`${asset}USDT`] || 0),
+    });
 
     let totalEquity = 0;
     let freeUsdt = 0;
@@ -353,7 +342,7 @@ export async function fetchRealBinanceAccount(params: {
       const total = free + locked;
 
       if (total > 0.000001 || ['USDT', 'BTC', 'ETH', 'SOL', 'BNB'].includes(b.asset)) {
-        const estPrice = refPrices[b.asset] || 1.0;
+        const estPrice = refPrices[b.asset];
         const valueUsd = Number((total * estPrice).toFixed(2));
         totalEquity += valueUsd;
 

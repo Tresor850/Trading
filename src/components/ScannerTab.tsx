@@ -1,6 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { MarketPair, UniverseConfig, Position } from '../types/trading';
 import { evaluatePairFilters } from '../services/tradingEngine';
+import {
+  checkSMCHealth,
+  scanLiveSMC,
+  SMCSignalResult,
+} from '../services/smcApiService';
 import {
   Search,
   Filter,
@@ -12,6 +17,9 @@ import {
   AlertCircle,
   Clock,
   Layers,
+  Cpu,
+  Zap,
+  RefreshCw,
 } from 'lucide-react';
 
 interface ScannerTabProps {
@@ -38,6 +46,44 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<'all' | 'index' | 'crypto' | 'commodity' | 'forex' | 'stock'>('all');
   const [sortBy, setSortBy] = useState<'volume' | 'change' | 'spread' | 'rsi'>('volume');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+
+  // État de l'intégration SMC Python (FastAPI)
+  const [smcOnline, setSmcOnline] = useState<boolean | null>(null);
+  const [smcScanning, setSmcScanning] = useState(false);
+  const [smcSignals, setSmcSignals] = useState<SMCSignalResult[]>([]);
+  const [smcScanInfo, setSmcScanInfo] = useState<string | null>(null);
+  const [activeStrategy, setActiveStrategy] = useState<'EMA' | 'SMC'>('SMC');
+
+  useEffect(() => {
+    checkSMCHealth().then((res) => setSmcOnline(res.online));
+    const interval = setInterval(() => {
+      checkSMCHealth().then((res) => setSmcOnline(res.online));
+    }, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleTriggerSMCScan = async () => {
+    setSmcScanning(true);
+    setSmcScanInfo(null);
+    try {
+      const res = await scanLiveSMC(10000, 30, '1h');
+      setSmcSignals(res.signals);
+      setActiveStrategy('SMC');
+      setSmcScanInfo(
+        isFrench
+          ? `Scan SMC réussi : ${res.scanned_count} paires analysées (${res.total_eligible_universe} éligibles U1-U6), ${res.signals_count} signal/signaux détecté(s).`
+          : `SMC Scan complete: ${res.scanned_count} pairs scanned, ${res.signals_count} signal(s) found.`
+      );
+    } catch (err: any) {
+      setSmcScanInfo(
+        isFrench
+          ? `Erreur serveur SMC : ${err.message}. Assurez-vous que l'API Python tourne (python3 smc_engine/api_server.py).`
+          : `SMC API error: ${err.message}`
+      );
+    } finally {
+      setSmcScanning(false);
+    }
+  };
 
   const openPositionSymbols = useMemo(() => {
     return new Set(positions.map((p) => p.symbol));
@@ -119,10 +165,14 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
             </div>
             <h2 className="text-sm font-bold text-white font-mono mt-0.5">
-              Stratégie EMA 9 / EMA 21 + Filtre RSI 14 (Timeframe 1h)
+              {activeStrategy === 'SMC'
+                ? 'Moteur SMC Calibré · Sélection Ciblée (ADA, DOT, ETH, XRP)'
+                : 'Stratégie EMA 9 / EMA 21 + Filtre RSI 14 (Timeframe 1h)'}
             </h2>
             <p className="text-xs text-neutral-400 mt-1">
-              Analyse automatique continue des <strong>Indices (CAC 40, DAX, S&P 500)</strong>, des <strong>Matières Premières (Or, Pétrole)</strong>, du <strong>Forex</strong> et de <strong>Binance Crypto Spot</strong>.
+              {activeStrategy === 'SMC'
+                ? 'Socle Actif : Mode Concentré Agressif (2 positions max, ~48% alloc, SL structurel, TP R:R 1:2.5).'
+                : 'Analyse automatique continue des Indices (CAC 40, DAX, S&P 500), Matières Premières, Forex et Binance Crypto Spot.'}
             </p>
           </div>
         </div>
@@ -138,10 +188,173 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
           </div>
           <div className="p-2 bg-neutral-950 border border-neutral-800 rounded">
             <span className="text-neutral-500 block text-[10px]">Positions bot</span>
-            <span className="text-amber-400 font-bold">{positions.length} / 5</span>
+            <span className="text-amber-400 font-bold">{positions.length} / 2</span>
           </div>
         </div>
       </div>
+
+      {/* SMC Strategy & Backend Status Strip */}
+      <div className="p-3.5 bg-neutral-900/90 border border-sky-800/60 rounded-lg flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-sky-950/80 border border-sky-700/60 rounded text-sky-400">
+            <Cpu className="w-4 h-4" />
+            <span className="font-bold">Moteur SMC Python</span>
+          </div>
+
+          {/* Statut Backend FastAPI */}
+          <div className="flex items-center gap-2 px-2.5 py-1 bg-neutral-950 border border-neutral-800 rounded">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                smcOnline === true
+                  ? 'bg-emerald-400 animate-pulse'
+                  : smcOnline === false
+                  ? 'bg-rose-500'
+                  : 'bg-neutral-500'
+              }`}
+            />
+            <span className="text-neutral-300">
+              API FastAPI (Port 8005) :{' '}
+              <strong
+                className={
+                  smcOnline === true
+                    ? 'text-emerald-400'
+                    : smcOnline === false
+                    ? 'text-rose-400'
+                    : 'text-neutral-400'
+                }
+              >
+                {smcOnline === true
+                  ? 'En ligne'
+                  : smcOnline === false
+                  ? 'Hors ligne (npm run smc:server)'
+                  : 'Vérification...'}
+              </strong>
+            </span>
+          </div>
+
+          {/* Sélecteur de stratégie active */}
+          <div className="flex items-center gap-1 bg-neutral-950 p-1 rounded border border-neutral-800">
+            <button
+              onClick={() => setActiveStrategy('EMA')}
+              className={`px-2.5 py-0.5 rounded transition-colors ${
+                activeStrategy === 'EMA'
+                  ? 'bg-emerald-950 text-emerald-300 font-bold border border-emerald-700'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              Stratégie EMA 9/21 + RSI
+            </button>
+            <button
+              onClick={() => setActiveStrategy('SMC')}
+              className={`px-2.5 py-0.5 rounded transition-colors flex items-center gap-1 ${
+                activeStrategy === 'SMC'
+                  ? 'bg-sky-950 text-sky-300 font-bold border border-sky-700'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              <Zap className="w-3 h-3 text-sky-400" />
+              Smart Money Concepts (SMC)
+            </button>
+          </div>
+        </div>
+
+        {/* Bouton d'action Scan SMC */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleTriggerSMCScan}
+            disabled={smcScanning || smcOnline === false}
+            className={`px-3 py-1.5 rounded font-bold transition-all flex items-center gap-1.5 ${
+              smcScanning || smcOnline === false
+                ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed border border-neutral-700'
+                : 'bg-sky-600 hover:bg-sky-500 text-white shadow-lg shadow-sky-900/30 active:scale-95'
+            }`}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${smcScanning ? 'animate-spin' : ''}`} />
+            <span>{smcScanning ? 'Scan SMC en cours…' : 'Scanner SMC Binance Live'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Information sur le scan SMC */}
+      {smcScanInfo && (
+        <div className="p-3 bg-neutral-900 border border-sky-800/40 rounded-lg flex items-start gap-2.5 text-xs font-mono text-neutral-300">
+          <AlertCircle className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <span className="font-bold text-sky-400">Rapport SMC : </span>
+            {smcScanInfo}
+          </div>
+        </div>
+      )}
+
+      {/* Cartes des signaux SMC détectés */}
+      {activeStrategy === 'SMC' && (
+        <div className="p-4 bg-neutral-900/80 border border-sky-800/60 rounded-lg space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Zap className="w-4 h-4 text-sky-400" />
+              <h3 className="text-xs font-mono font-bold text-white uppercase tracking-wider">
+                Signaux Algorithmiques SMC Actifs ({smcSignals.length})
+              </h3>
+            </div>
+            <span className="text-[11px] font-mono text-neutral-400">
+              Sweep SSL + CHoCH/BOS + Order Block / FVG + SL structurel + ATR
+            </span>
+          </div>
+
+          {smcSignals.length === 0 ? (
+            <div className="p-6 text-center text-xs font-mono text-neutral-500 border border-dashed border-neutral-800 rounded bg-neutral-950/50">
+              Aucun signal SMC actif pour le moment. Cliquez sur{' '}
+              <strong className="text-sky-400">« Scanner SMC Binance Live »</strong> pour déclencher l'analyse de l'univers Binance Spot U1-U6.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {smcSignals.map((sig, idx) => (
+                <div
+                  key={`${sig.symbol}_${idx}`}
+                  className="p-3 bg-neutral-950 border border-sky-700/70 rounded-lg space-y-2 font-mono text-xs hover:border-sky-500 transition-colors"
+                >
+                  <div className="flex items-center justify-between border-b border-neutral-800 pb-2">
+                    <span className="font-bold text-white text-sm">{sig.symbol}</span>
+                    <span className="px-2 py-0.5 bg-sky-950 text-sky-300 border border-sky-700 rounded text-[10px] font-bold">
+                      {sig.signal_type}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <div>
+                      <span className="text-neutral-500 block text-[10px]">Entrée (Close)</span>
+                      <span className="text-neutral-200 font-bold">{sig.entry_price} USDT</span>
+                    </div>
+                    <div>
+                      <span className="text-neutral-500 block text-[10px]">Stop-Loss (Structurel)</span>
+                      <span className="text-rose-400 font-bold">
+                        {sig.stop_loss} USDT ({sig.sl_distance_pct}%)
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-neutral-500 block text-[10px]">Take-Profit (R:R {sig.rr_ratio})</span>
+                      <span className="text-emerald-400 font-bold">
+                        {sig.take_profit} USDT (+{sig.tp_distance_pct}%)
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-neutral-500 block text-[10px]">Taille Allouée</span>
+                      <span className="text-amber-400 font-bold">
+                        {sig.position_size_usd} $ ({sig.allocation_pct}%)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="pt-1.5 border-t border-neutral-800/80 text-[10px] text-neutral-400">
+                    <span className="text-sky-400 block font-semibold mb-0.5">Détails SMC :</span>
+                    {sig.notes}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Market Category Segmented Control (CAC40, Indices, Crypto, Commodities, Forex, Stocks) */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1 text-xs font-mono scrollbar-none">

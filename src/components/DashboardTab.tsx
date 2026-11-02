@@ -222,7 +222,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <button
-                onClick={() => onTriggerTestOrder('CAC40/EUR')}
+                onClick={() => onTriggerTestOrder('BTC/USDT')}
                 className="px-2.5 py-1 bg-emerald-950/90 hover:bg-emerald-900 border border-emerald-700 text-emerald-300 rounded text-xs transition-colors flex items-center gap-1.5 font-bold"
               >
                 <span>🇫🇷</span>
@@ -446,7 +446,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 mt-4">
-          {['CAC40/EUR', 'EUR/USD', 'USD/EUR', 'SPX/USD', 'DAX40/EUR', 'XAU/USD', 'BTC/USDT', 'SOL/USDT']
+          {['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
             .map((sym) => pairs.find((p) => p.symbol === sym))
             .filter((p): p is MarketPair => Boolean(p))
             .map((p) => {

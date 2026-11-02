@@ -4,7 +4,8 @@ import {
   UniverseConfig,
   BacktestResult,
 } from '../types/trading';
-import { runPortfolioBacktest } from '../services/backtestEngine';
+import { runPortfolioBacktest, BacktestResultEx } from '../services/backtestEngine';
+import { runRealBacktest } from '../services/backtestRunner';
 import {
   BarChart3,
   Play,
@@ -32,17 +33,22 @@ export const BacktestTab: React.FC<BacktestTabProps> = ({
   const [daysBack, setDaysBack] = useState<number>(60);
   const [initialCapital, setInitialCapital] = useState<number>(10000);
   const [isRunning, setIsRunning] = useState<boolean>(false);
-  const [result, setResult] = useState<BacktestResult>(() =>
+  const [result, setResult] = useState<BacktestResultEx>(() =>
     runPortfolioBacktest(riskConfig, universeConfig, 10000, 60)
   );
 
-  const handleRunBacktest = () => {
+  const [error, setError] = useState<string>('');
+
+  const handleRunBacktest = async () => {
     setIsRunning(true);
-    setTimeout(() => {
-      const res = runPortfolioBacktest(riskConfig, universeConfig, initialCapital, daysBack);
-      setResult(res);
-      setIsRunning(false);
-    }, 400);
+    setError('');
+    try {
+      setResult(await runRealBacktest(riskConfig, initialCapital, daysBack));
+    } catch (e: any) {
+      setError(`Données Binance indisponibles (${e?.message || 'réseau'}). Affichage d'un test à vide sur marché aléatoire : ce n'est PAS une prévision.`);
+      setResult(runPortfolioBacktest(riskConfig, universeConfig, initialCapital, daysBack));
+    }
+    setIsRunning(false);
   };
 
   const handleExportCSV = () => {
@@ -86,6 +92,11 @@ export const BacktestTab: React.FC<BacktestTabProps> = ({
 
   return (
     <div className="space-y-6">
+      <div className={`p-3 rounded-lg border text-xs font-mono ${result.dataSource === 'binance' ? 'bg-emerald-950/40 border-emerald-800 text-emerald-200' : 'bg-rose-950/40 border-rose-800 text-rose-200'}`}>
+        {result.dataSource === 'binance'
+          ? `Backtest réel sur historique Binance 1h (${result.startDate} → ${result.endDate}) : le taux de réussite est mesuré. Sans filtre de tendance : ${result.baseline?.netProfitPct}% net (réussite ${result.baseline?.winRatePct}%) ; avec filtre : ${result.netProfitPct}%. Dernier tiers, jamais optimisé : ${result.outOfSample?.netProfitPct}% net sur ${result.outOfSample?.totalTrades} trades (PF ${result.outOfSample?.profitFactor}). ${result.netProfitPct > 0 && (result.outOfSample?.netProfitPct ?? -1) > 0 ? 'Rentable sur le trimestre ET hors échantillon.' : 'Non validé : ne pas passer en réel.'}`
+          : error || "Test à vide sur marché aléatoire sans tendance (aucune donnée réelle). Lancez le backtest pour télécharger l'historique Binance."}
+      </div>
       {/* Over-optimization Mandatory Warning (Requirement B4) */}
       <div className="p-4 bg-amber-950/70 border border-amber-800 rounded-lg text-amber-200 text-xs flex items-start gap-3">
         <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
@@ -162,11 +173,11 @@ export const BacktestTab: React.FC<BacktestTabProps> = ({
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="p-3 bg-neutral-900 border border-neutral-800 rounded">
           <span className="text-[11px] font-mono text-neutral-400 block">Rendement Net</span>
-          <div className="text-lg font-bold font-mono tabular-nums text-emerald-400 mt-0.5">
-            +{result.netProfitPct}%
+          <div className={`text-lg font-bold font-mono tabular-nums mt-0.5 ${result.netProfitPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {result.netProfitPct >= 0 ? '+' : ''}{result.netProfitPct}%
           </div>
           <span className="text-[10px] text-neutral-500 font-mono">
-            +${result.netProfitUsd.toFixed(0)} USDT
+            {result.netProfitUsd.toFixed(0)} USDT
           </span>
         </div>
 
